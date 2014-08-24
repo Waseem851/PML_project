@@ -1,0 +1,169 @@
+---
+title: "Practical Machine Learning Project"
+author: "Waseem Akhtar"
+date: "23 Aug 2014"
+output: html_document
+---
+### The project
+The project is concerned with a classification problem. The goal is to train a model based on a number of different continuous and discrete features to predict $5$ different classes.
+
+### Loading of the data and preliminary observations
+First the necessary packages required for this analysis are loaded.
+
+```{r comment = "", results = 'hide'}
+library(caret)
+library(reshape2) # required for properly shaping the data for plotting with ggplot2
+```
+
+The large CSV file containing the dataset to train the model is loaded.
+
+```{r comment = ""}
+data <- read.csv(file = "/Users/w.akhtar/maclear/John_Hopkins/porject/pml-training.csv", header = T)
+dim(data)
+```
+
+The data consists of around $20$ thousand training examples of ~$160$ features. A preliminary analysis of the data leads to the following observations;
+
+  * There are many variables in the dataset which mostly have no values (NAs).
+  * In addition, there are many variables which have near zero variance.
+  * The first column of the data is just the index
+  
+The above mentioned columns will likely contribute very little to any model building. These columns, therefore, can be safely removed before training the model.
+In order to remove these non-informative columns, I wrote the following function:
+
+```{r}
+my.preprocess <- function(df){
+  # check if the input argument is a dataframe
+  if(!is.data.frame(df)){
+    stop("df must be a data frame")
+  }
+  # make a logical vector which tells whether the NAs in a column are less than 50% (TRUE) or not (FALSE)
+  vec <- sapply(1:ncol(df), function(m) {sum(is.na(df[,m])) < (nrow(df) * 0.5)})
+  # subset the df based on vec
+  df <- df[, vec]
+  # Find those variables which have near zero variation
+  nsv <- nearZeroVar(df, saveMetrics = T)
+  df <- df[ , !nsv$nzv]
+  # remove the first column, which is just index
+  df <- df[, -1]
+  df   # retrun the processed data.frame
+}
+
+# pre-processing the data using this function
+data <- my.preprocess(data)
+```
+
+This initial pre processing leaves us with 57 variables and the data labels `data$classe`. Only two of these variables are factors whereas all the rest are numeric. In order to see if there is a strong covariance in the features, I removed the two factor columns namely `user_name` and `cvtd_timestamp` and made a heat map of the remaining columns to observe co-variance in the data.
+
+```{r comment = "", fig.height=9, fig.width=9}
+data1 <- data[, - c(1,4)]
+# now using ggplot2 geom_raster to see the corelation between different variables
+mat <- cor(data1[- ncol(data1)])
+mat <- melt(mat)
+ggplot(mat, aes(Var1, Var2, fill = value)) + geom_raster() +
+  scale_fill_gradient2( low = "blue", high = "red", name="Correlation") +
+  xlab("Features") + ylab("Features") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+This shows that many variables have a strong (anti-)correlation with each other. This is further supported by the fact that $90$% of the variance in the data can be explained by only $20$ principle components.
+
+```{r comment = ""}
+pca <- preProcess(data1[, 1:ncol(data1) - 1], method = "pca", thresh = 0.90)
+pca$numComp
+
+```
+
+This is an important property of our dataset to keep in mind and later if model fitting truns out to be computationally intensive and very slow, we can always reduce the dimensions by applying PCA.
+
+### Building the model and estimating of out of sample error
+It is a classification problem, so classification techniques like regression trees, Random Forests or support vector machines can be good candidates to try here.
+At first I will split the dataset into a training ($60$%) and a test (cross validation) set ($40$%). Then I will try a few different classification approaches to train the model and will choose the one which has the lowest out of sample error.
+
+```{r comment = ""}
+trainIndex = createDataPartition(data$classe, p = 0.60,list=FALSE)
+training = data [trainIndex,]
+testing  = data [-trainIndex,]
+```
+
+#### Classification trees
+
+```{r comment = ""}
+set.seed(125)
+model_ctree <- train(classe ~ . , method = "ctree" , data = training)
+#print(model_ctree$finalModel)
+predictions <- predict(model_ctree, newdata = testing[,1:ncol(testing) - 1])
+# out of sample error
+(err_ctree <- 1 - mean(predictions == testing$classe))
+```
+
+#### Random forests
+
+```{r comment = ""}
+trCtrl <- trainControl(method = "oob", number = 3)
+set.seed(125)
+model_rf <- train(classe ~ . , method = "rf" , data = training, trControl = trCtrl)
+print(model_rf$finalModel)
+predictions <- predict(model_rf, newdata = testing[,1:ncol(testing) - 1])
+# out of sample error
+(err_rf <- 1 - mean(predictions == testing$classe))
+```
+
+This clearly shows that Random Forests are doing a much better job in prediction compared to classification trees.
+
+#### Support vector machines
+
+```{r comment = ""}
+trCtrl <- trainControl(method = "cv", savePred=T, classProb=T)
+set.seed(125)
+modsvm <- train(classe~., data=data, method = "svmLinear", trControl = trCtrl)
+print(modsvm$finalModel)
+predictions <- predict(modsvm, newdata = testing[,1:ncol(testing) - 1])
+# out of sample error
+(err_svm <- 1 - mean(predictions == testing$classe))
+```
+
+### Comparison between the three modelling techniques
+
+```{r comment = ""}
+barplot(c(Classification_trees = err_ctree, Random_Forests = err_rf, Support_Vector_Machines = err_svm),
+        main = "Comparison of performance of different\nmachine learning methods on project data", 
+        xlab = "Machine Learning Technique", ylab = "Out of Sample Error")
+
+```
+
+These results show that Random Forests are doing a much better job in in classifying our data correctly compared to classification trees and support vector machines (trained with linear boundries). Probably a more sophisticated implementation of SVM with a non-linear kernel function will provide better results.
+
+### Applying the best performing model on the test data
+
+```{r comment = ""}
+testData <- read.csv(file = "/Users/w.akhtar/maclear/John_Hopkins/porject/pml-testing.csv", header = T)
+testData <- my.preprocess(testData)
+pred_vec <- as.character(predict(model_rf, testData[, - ncol(testData)]))
+```
+
+Now using the `pml_write_files` function, I will generate the files for submitting the predictions.
+
+```{r comment = ""}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(pred_vec)
+
+```
+
+### Conclusions
+I tried three powerful classification training methods on the project data and compared their performance. In my hands, random forests outperformed other two methods i.e., classification trees and support vector machines. It is important to note here that SVM implementation with a non-linear kernel function might give better results. Unfortunately, for time constraints, I could not test this. Furthermore, I did not test some other very powerful classification methods such as boosting which could perform comparably to random forests.
+
+### Session Info
+
+```{r comment = ""}
+sessionInfo()
+
+```
+
